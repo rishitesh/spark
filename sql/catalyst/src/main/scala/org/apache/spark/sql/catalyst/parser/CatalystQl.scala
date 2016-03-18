@@ -19,6 +19,9 @@ package org.apache.spark.sql.catalyst.parser
 
 import java.sql.Date
 
+import scala.collection.mutable.ArrayBuffer
+import scala.util.matching.Regex
+
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis._
@@ -201,19 +204,19 @@ https://cwiki.apache.org/confluence/display/Hive/Enhanced+Aggregation%2C+Cube%2C
             case None => OneRowRelation
           }
 
+          val withLateralView = lateralViewClause.map { lv =>
+            nodeToGenerate(lv.children.head, outer = false, relations)
+          }.getOrElse(relations)
+
           val withWhere = whereClause.map { whereNode =>
             val Seq(whereExpr) = whereNode.children
-            Filter(nodeToExpr(whereExpr), relations)
-          }.getOrElse(relations)
+            Filter(nodeToExpr(whereExpr), withLateralView)
+          }.getOrElse(withLateralView)
 
           val select = (selectClause orElse selectDistinctClause)
             .getOrElse(sys.error("No select clause."))
 
           val transformation = nodeToTransformation(select.children.head, withWhere)
-
-          val withLateralView = lateralViewClause.map { lv =>
-            nodeToGenerate(lv.children.head, outer = false, withWhere)
-          }.getOrElse(withWhere)
 
           // The projection of the query can either be a normal projection, an aggregation
           // (if there is a group by) or a script transformation.
@@ -224,13 +227,13 @@ https://cwiki.apache.org/confluence/display/Hive/Enhanced+Aggregation%2C+Cube%2C
               groupByClause.map(e => e match {
                 case Token("TOK_GROUPBY", children) =>
                   // Not a transformation so must be either project or aggregation.
-                  Aggregate(children.map(nodeToExpr), selectExpressions, withLateralView)
+                  Aggregate(children.map(nodeToExpr), selectExpressions, withWhere)
                 case _ => sys.error("Expect GROUP BY")
               }),
               groupingSetsClause.map(e => e match {
                 case Token("TOK_GROUPING_SETS", children) =>
                   val(groupByExprs, masks) = extractGroupingSet(children)
-                  GroupingSets(masks, groupByExprs, withLateralView, selectExpressions)
+                  GroupingSets(masks, groupByExprs, withWhere, selectExpressions)
                 case _ => sys.error("Expect GROUPING SETS")
               }),
               rollupGroupByClause.map(e => e match {
@@ -238,7 +241,7 @@ https://cwiki.apache.org/confluence/display/Hive/Enhanced+Aggregation%2C+Cube%2C
                   Aggregate(
                     Seq(Rollup(children.map(nodeToExpr))),
                     selectExpressions,
-                    withLateralView)
+                    withWhere)
                 case _ => sys.error("Expect WITH ROLLUP")
               }),
               cubeGroupByClause.map(e => e match {
@@ -246,10 +249,10 @@ https://cwiki.apache.org/confluence/display/Hive/Enhanced+Aggregation%2C+Cube%2C
                   Aggregate(
                     Seq(Cube(children.map(nodeToExpr))),
                     selectExpressions,
-                    withLateralView)
+                    withWhere)
                 case _ => sys.error("Expect WITH CUBE")
               }),
-              Some(Project(selectExpressions, withLateralView))).flatten.head
+              Some(Project(selectExpressions, withWhere))).flatten.head
           }
 
           // Handle HAVING clause.
@@ -416,27 +419,44 @@ https://cwiki.apache.org/confluence/display/Hive/Enhanced+Aggregation%2C+Cube%2C
           sys.error(s"Unsupported join operation: $other")
         }
 
-        val joinType = joinToken match {
-          case "TOK_JOIN" => Inner
-          case "TOK_CROSSJOIN" => Inner
-          case "TOK_RIGHTOUTERJOIN" => RightOuter
-          case "TOK_LEFTOUTERJOIN" => LeftOuter
-          case "TOK_FULLOUTERJOIN" => FullOuter
-          case "TOK_LEFTSEMIJOIN" => LeftSemi
-          case "TOK_UNIQUEJOIN" => noParseRule("Unique Join", node)
-          case "TOK_ANTIJOIN" => noParseRule("Anti Join", node)
-          case "TOK_NATURALJOIN" => NaturalJoin(Inner)
-          case "TOK_NATURALRIGHTOUTERJOIN" => NaturalJoin(RightOuter)
-          case "TOK_NATURALLEFTOUTERJOIN" => NaturalJoin(LeftOuter)
-          case "TOK_NATURALFULLOUTERJOIN" => NaturalJoin(FullOuter)
-        }
+        val (joinType, joinCondition) = getJoinInfo(joinToken, other, node)
+
         Join(nodeToRelation(relation1),
           nodeToRelation(relation2),
           joinType,
-          other.headOption.map(nodeToExpr))
-
+          joinCondition)
       case _ =>
         noParseRule("Relation", node)
+    }
+  }
+
+  protected def getJoinInfo(
+     joinToken: String,
+     joinConditionToken: Seq[ASTNode],
+     node: ASTNode): (JoinType, Option[Expression]) = {
+    val joinType = joinToken match {
+      case "TOK_JOIN" => Inner
+      case "TOK_CROSSJOIN" => Inner
+      case "TOK_RIGHTOUTERJOIN" => RightOuter
+      case "TOK_LEFTOUTERJOIN" => LeftOuter
+      case "TOK_FULLOUTERJOIN" => FullOuter
+      case "TOK_LEFTSEMIJOIN" => LeftSemi
+      case "TOK_UNIQUEJOIN" => noParseRule("Unique Join", node)
+      case "TOK_ANTIJOIN" => noParseRule("Anti Join", node)
+      case "TOK_NATURALJOIN" => NaturalJoin(Inner)
+      case "TOK_NATURALRIGHTOUTERJOIN" => NaturalJoin(RightOuter)
+      case "TOK_NATURALLEFTOUTERJOIN" => NaturalJoin(LeftOuter)
+      case "TOK_NATURALFULLOUTERJOIN" => NaturalJoin(FullOuter)
+    }
+
+    joinConditionToken match {
+      case Token("TOK_USING", columnList :: Nil) :: Nil =>
+        val colNames = columnList.children.collect {
+          case Token(name, Nil) => UnresolvedAttribute(name)
+        }
+        (UsingJoin(joinType, colNames), None)
+      /* Join expression specified using ON clause */
+      case _ => (joinType, joinConditionToken.headOption.map(nodeToExpr))
     }
   }
 
@@ -521,6 +541,39 @@ https://cwiki.apache.org/confluence/display/Hive/Enhanced+Aggregation%2C+Cube%2C
 
     case _ =>
       noParseRule("Select", node)
+  }
+
+  /**
+   * Flattens the left deep tree with the specified pattern into a list.
+   */
+  private def flattenLeftDeepTree(node: ASTNode, pattern: Regex): Seq[ASTNode] = {
+    val collected = ArrayBuffer[ASTNode]()
+    var rest = node
+    while (rest match {
+      case Token(pattern(), l :: r :: Nil) =>
+        collected += r
+        rest = l
+        true
+      case _ => false
+    }) {
+      // do nothing
+    }
+    collected += rest
+    // keep them in the same order as in SQL
+    collected.reverse
+  }
+
+  /**
+   * Creates a balanced tree that has similar number of nodes on left and right.
+   *
+   * This help to reduce the depth of the tree to prevent StackOverflow in analyzer/optimizer.
+   */
+  private def balancedTree(
+      expr: Seq[Expression],
+      f: (Expression, Expression) => Expression): Expression = expr.length match {
+    case 1 => expr.head
+    case 2 => f(expr.head, expr(1))
+    case l => f(balancedTree(expr.slice(0, l / 2), f), balancedTree(expr.slice(l / 2, l), f))
   }
 
   protected def nodeToExpr(node: ASTNode): Expression = node match {
@@ -635,8 +688,10 @@ https://cwiki.apache.org/confluence/display/Hive/Enhanced+Aggregation%2C+Cube%2C
       }
 
     /* Boolean Logic */
-    case Token(AND(), left :: right:: Nil) => And(nodeToExpr(left), nodeToExpr(right))
-    case Token(OR(), left :: right:: Nil) => Or(nodeToExpr(left), nodeToExpr(right))
+    case Token(AND(), left :: right:: Nil) =>
+      balancedTree(flattenLeftDeepTree(node, AND).map(nodeToExpr), And)
+    case Token(OR(), left :: right:: Nil) =>
+      balancedTree(flattenLeftDeepTree(node, OR).map(nodeToExpr), Or)
     case Token(NOT(), child :: Nil) => Not(nodeToExpr(child))
     case Token("!", child :: Nil) => Not(nodeToExpr(child))
 
@@ -861,10 +916,16 @@ https://cwiki.apache.org/confluence/display/Hive/Enhanced+Aggregation%2C+Cube%2C
     }
 
     val attributes = clauses.collect {
-      case Token(a, Nil) => UnresolvedAttribute(a.toLowerCase)
+      case Token(a, Nil) => UnresolvedAttribute(cleanIdentifier(a.toLowerCase))
     }
 
-    Generate(generator, join = true, outer = outer, Some(alias.toLowerCase), attributes, child)
+    Generate(
+      generator,
+      join = true,
+      outer = outer,
+      Some(cleanIdentifier(alias.toLowerCase)),
+      attributes,
+      child)
   }
 
   protected def nodeToGenerator(node: ASTNode): Generator = noParseRule("Generator", node)
