@@ -45,7 +45,9 @@ statement
     | ALTER DATABASE identifier SET DBPROPERTIES tablePropertyList     #setDatabaseProperties
     | DROP DATABASE (IF EXISTS)? identifier (RESTRICT | CASCADE)?      #dropDatabase
     | createTableHeader ('(' colTypeList ')')? tableProvider
-        (OPTIONS tablePropertyList)?                                   #createTableUsing
+        (OPTIONS tablePropertyList)?
+        (PARTITIONED BY partitionColumnNames=identifierList)?
+        bucketSpec?                                                    #createTableUsing
     | createTableHeader tableProvider
         (OPTIONS tablePropertyList)?
         (PARTITIONED BY partitionColumnNames=identifierList)?
@@ -81,20 +83,10 @@ statement
         DROP (IF EXISTS)? partitionSpec (',' partitionSpec)* PURGE?    #dropTablePartitions
     | ALTER VIEW tableIdentifier
         DROP (IF EXISTS)? partitionSpec (',' partitionSpec)*           #dropTablePartitions
-    | ALTER TABLE tableIdentifier partitionSpec?
-        SET FILEFORMAT fileFormat                                      #setTableFileFormat
     | ALTER TABLE tableIdentifier partitionSpec? SET locationSpec      #setTableLocation
-    | ALTER TABLE tableIdentifier partitionSpec?
-        CHANGE COLUMN? oldName=identifier colType
-        (FIRST | AFTER after=identifier)? (CASCADE | RESTRICT)?        #changeColumn
-    | ALTER TABLE tableIdentifier partitionSpec?
-        ADD COLUMNS '(' colTypeList ')' (CASCADE | RESTRICT)?          #addColumns
-    | ALTER TABLE tableIdentifier partitionSpec?
-        REPLACE COLUMNS '(' colTypeList ')' (CASCADE | RESTRICT)?      #replaceColumns
-    | DROP TABLE (IF EXISTS)? tableIdentifier PURGE?
-        (FOR METADATA? REPLICATION '(' STRING ')')?                    #dropTable
+    | DROP TABLE (IF EXISTS)? tableIdentifier PURGE?                   #dropTable
     | DROP VIEW (IF EXISTS)? tableIdentifier                           #dropTable
-    | CREATE (OR REPLACE)? VIEW (IF NOT EXISTS)? tableIdentifier
+    | CREATE (OR REPLACE)? TEMPORARY? VIEW (IF NOT EXISTS)? tableIdentifier
         identifierCommentList? (COMMENT STRING)?
         (PARTITIONED ON identifierList)?
         (TBLPROPERTIES tablePropertyList)? AS query                    #createView
@@ -102,7 +94,7 @@ statement
     | CREATE TEMPORARY? FUNCTION qualifiedName AS className=STRING
         (USING resource (',' resource)*)?                              #createFunction
     | DROP TEMPORARY? FUNCTION (IF EXISTS)? qualifiedName              #dropFunction
-    | EXPLAIN explainOption* statement                                 #explain
+    | EXPLAIN (LOGICAL | FORMATTED | EXTENDED | CODEGEN)? statement    #explain
     | SHOW TABLES ((FROM | IN) db=identifier)?
         (LIKE? pattern=STRING)?                                        #showTables
     | SHOW DATABASES (LIKE pattern=STRING)?                            #showDatabases
@@ -112,6 +104,7 @@ statement
         ((FROM | IN) db=identifier)?                                   #showColumns
     | SHOW PARTITIONS tableIdentifier partitionSpec?                   #showPartitions
     | SHOW FUNCTIONS (LIKE? (qualifiedName | pattern=STRING))?         #showFunctions
+    | SHOW CREATE TABLE tableIdentifier                                #showCreateTable
     | (DESC | DESCRIBE) FUNCTION EXTENDED? describeFuncName            #describeFunction
     | (DESC | DESCRIBE) option=(EXTENDED | FORMATTED)?
         tableIdentifier partitionSpec? describeColName?                #describeTable
@@ -170,6 +163,10 @@ unsupportedHiveNativeCommands
     | kw1=ALTER kw2=TABLE tableIdentifier kw3=TOUCH
     | kw1=ALTER kw2=TABLE tableIdentifier partitionSpec? kw3=COMPACT
     | kw1=ALTER kw2=TABLE tableIdentifier partitionSpec? kw3=CONCATENATE
+    | kw1=ALTER kw2=TABLE tableIdentifier partitionSpec? kw3=SET kw4=FILEFORMAT
+    | kw1=ALTER kw2=TABLE tableIdentifier partitionSpec? kw3=ADD kw4=COLUMNS
+    | kw1=ALTER kw2=TABLE tableIdentifier partitionSpec? kw3=CHANGE kw4=COLUMNS?
+    | kw1=ALTER kw2=TABLE tableIdentifier partitionSpec? kw3=REPLACE kw4=COLUMNS
     | kw1=START kw2=TRANSACTION
     | kw1=COMMIT
     | kw1=ROLLBACK
@@ -389,7 +386,8 @@ sample
     : TABLESAMPLE '('
       ( (percentage=(INTEGER_VALUE | DECIMAL_VALUE) sampleType=PERCENTLIT)
       | (expression sampleType=ROWS)
-      | (sampleType=BUCKET numerator=INTEGER_VALUE OUT OF denominator=INTEGER_VALUE (ON identifier)?))
+      | sampleType=BYTELENGTH_LITERAL
+      | (sampleType=BUCKET numerator=INTEGER_VALUE OUT OF denominator=INTEGER_VALUE (ON (identifier | qualifiedName '(' ')'))?))
       ')'
     ;
 
@@ -592,11 +590,6 @@ frameBound
     | expression boundType=(PRECEDING | FOLLOWING)
     ;
 
-
-explainOption
-    : LOGICAL | FORMATTED | EXTENDED | CODEGEN
-    ;
-
 qualifiedName
     : identifier ('.' identifier)*
     ;
@@ -646,9 +639,9 @@ nonReserved
     | NO | DATA
     | START | TRANSACTION | COMMIT | ROLLBACK
     | SORT | CLUSTER | DISTRIBUTE | UNSET | TBLPROPERTIES | SKEWED | STORED | DIRECTORIES | LOCATION
-    | EXCHANGE | ARCHIVE | UNARCHIVE | FILEFORMAT | TOUCH | COMPACT | CONCATENATE | CHANGE | FIRST
-    | AFTER | CASCADE | RESTRICT | BUCKETS | CLUSTERED | SORTED | PURGE | INPUTFORMAT | OUTPUTFORMAT
-    | DBPROPERTIES | DFS | TRUNCATE | METADATA | REPLICATION | COMPUTE
+    | EXCHANGE | ARCHIVE | UNARCHIVE | FILEFORMAT | TOUCH | COMPACT | CONCATENATE | CHANGE
+    | CASCADE | RESTRICT | BUCKETS | CLUSTERED | SORTED | PURGE | INPUTFORMAT | OUTPUTFORMAT
+    | DBPROPERTIES | DFS | TRUNCATE | COMPUTE
     | STATISTICS | ANALYZE | PARTITIONED | EXTERNAL | DEFINED | RECORDWRITER
     | REVOKE | GRANT | LOCK | UNLOCK | MSCK | REPAIR | EXPORT | IMPORT | LOAD | VALUES | COMMENT | ROLE
     | ROLES | COMPACTIONS | PRINCIPALS | TRANSACTIONS | INDEX | INDEXES | LOCKS | OPTION | LOCAL | INPATH
@@ -835,8 +828,6 @@ TOUCH: 'TOUCH';
 COMPACT: 'COMPACT';
 CONCATENATE: 'CONCATENATE';
 CHANGE: 'CHANGE';
-FIRST: 'FIRST';
-AFTER: 'AFTER';
 CASCADE: 'CASCADE';
 RESTRICT: 'RESTRICT';
 CLUSTERED: 'CLUSTERED';
@@ -848,8 +839,6 @@ DATABASE: 'DATABASE' | 'SCHEMA';
 DATABASES: 'DATABASES' | 'SCHEMAS';
 DFS: 'DFS';
 TRUNCATE: 'TRUNCATE';
-METADATA: 'METADATA';
-REPLICATION: 'REPLICATION';
 ANALYZE: 'ANALYZE';
 COMPUTE: 'COMPUTE';
 STATISTICS: 'STATISTICS';
@@ -893,6 +882,10 @@ SMALLINT_LITERAL
 
 TINYINT_LITERAL
     : DIGIT+ 'Y'
+    ;
+
+BYTELENGTH_LITERAL
+    : DIGIT+ ('B' | 'K' | 'M' | 'G')
     ;
 
 INTEGER_VALUE

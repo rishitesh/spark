@@ -99,7 +99,7 @@ class TaskMetrics private[spark] () extends Serializable {
   /**
    * Storage statuses of any blocks that have been updated as a result of this task.
    */
-  def updatedBlockStatuses: Seq[(BlockId, BlockStatus)] = _updatedBlockStatuses.localValue
+  def updatedBlockStatuses: Seq[(BlockId, BlockStatus)] = _updatedBlockStatuses.value
 
   // Setters and increment-ers
   private[spark] def setExecutorDeserializeTime(v: Long): Unit =
@@ -218,7 +218,7 @@ class TaskMetrics private[spark] () extends Serializable {
   /**
    * External accumulators registered with this task.
    */
-  @transient private lazy val externalAccums = new ArrayBuffer[AccumulatorV2[_, _]]
+  @transient private[spark] lazy val externalAccums = new ArrayBuffer[AccumulatorV2[_, _]]
 
   private[spark] def registerAccumulator(a: AccumulatorV2[_, _]): Unit = {
     externalAccums += a
@@ -291,22 +291,30 @@ private[spark] object TaskMetrics extends Logging {
 
 private[spark] class BlockStatusesAccumulator
   extends AccumulatorV2[(BlockId, BlockStatus), Seq[(BlockId, BlockStatus)]] {
-  private[this] var _seq = ArrayBuffer.empty[(BlockId, BlockStatus)]
+  private var _seq = ArrayBuffer.empty[(BlockId, BlockStatus)]
 
   override def isZero(): Boolean = _seq.isEmpty
 
   override def copyAndReset(): BlockStatusesAccumulator = new BlockStatusesAccumulator
 
+  override def copy(): BlockStatusesAccumulator = {
+    val newAcc = new BlockStatusesAccumulator
+    newAcc._seq = _seq.clone()
+    newAcc
+  }
+
+  override def reset(): Unit = _seq.clear()
+
   override def add(v: (BlockId, BlockStatus)): Unit = _seq += v
 
   override def merge(other: AccumulatorV2[(BlockId, BlockStatus), Seq[(BlockId, BlockStatus)]])
   : Unit = other match {
-    case o: BlockStatusesAccumulator => _seq ++= o.localValue
+    case o: BlockStatusesAccumulator => _seq ++= o.value
     case _ => throw new UnsupportedOperationException(
       s"Cannot merge ${this.getClass.getName} with ${other.getClass.getName}")
   }
 
-  override def localValue: Seq[(BlockId, BlockStatus)] = _seq
+  override def value: Seq[(BlockId, BlockStatus)] = _seq
 
   def setValue(newValue: Seq[(BlockId, BlockStatus)]): Unit = {
     _seq.clear()

@@ -39,7 +39,7 @@ import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, LogicalPlan, 
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.ui.SQLListener
-import org.apache.spark.sql.internal.{CatalogImpl, SessionState, SharedState, SQLConf}
+import org.apache.spark.sql.internal.{CatalogImpl, SessionState, SharedState}
 import org.apache.spark.sql.sources.BaseRelation
 import org.apache.spark.sql.types.{DataType, LongType, StructType}
 import org.apache.spark.sql.util.ExecutionListenerManager
@@ -54,6 +54,7 @@ import org.apache.spark.util.Utils
  * {{{
  *   SparkSession.builder()
  *     .master("local")
+ *     .appName("Word Count")
  *     .config("spark.some.config.option", "some-value").
  *     .getOrCreate()
  * }}}
@@ -63,27 +64,15 @@ class SparkSession private(
     @transient private val existingSharedState: Option[SharedState])
   extends Serializable with Logging { self =>
 
-  def this(sc: SparkContext) {
+  private[sql] def this(sc: SparkContext) {
     this(sc, None)
   }
 
+  sparkContext.assertNotStopped()
 
   /* ----------------------- *
    |  Session-related state  |
    * ----------------------- */
-
-  {
-    val defaultWarehousePath =
-      SQLConf.WAREHOUSE_PATH
-        .defaultValueString
-        .replace("${system:user.dir}", System.getProperty("user.dir"))
-    val warehousePath = sparkContext.conf.get(
-      SQLConf.WAREHOUSE_PATH.key,
-      defaultWarehousePath)
-    sparkContext.conf.set(SQLConf.WAREHOUSE_PATH.key, warehousePath)
-    sparkContext.conf.set("hive.metastore.warehouse.dir", warehousePath)
-    logInfo(s"Setting warehouse location to $warehousePath")
-  }
 
   /**
    * State shared across sessions, including the [[SparkContext]], cached data, listener,
@@ -114,14 +103,17 @@ class SparkSession private(
   @transient
   private var _wrapped: SQLContext = _
 
-  protected[sql] def wrapped: SQLContext = {
+  @transient
+  private val _wrappedLock = new Object
+
+  protected[sql] def wrapped: SQLContext = _wrappedLock.synchronized {
     if (_wrapped == null) {
       _wrapped = new SQLContext(self, isRootContext = false)
     }
     _wrapped
   }
 
-  protected[sql] def setWrappedContext(sqlContext: SQLContext): Unit = {
+  protected[sql] def setWrappedContext(sqlContext: SQLContext): Unit = _wrappedLock.synchronized {
     _wrapped = sqlContext
   }
 
@@ -293,7 +285,7 @@ class SparkSession private(
    *  // |-- name: string (nullable = false)
    *  // |-- age: integer (nullable = true)
    *
-   *  dataFrame.registerTempTable("people")
+   *  dataFrame.createOrReplaceTempView("people")
    *  sparkSession.sql("select name from people").collect.foreach(println)
    * }}}
    *
@@ -524,16 +516,15 @@ class SparkSession private(
   }
 
   /**
-   * Registers the given [[DataFrame]] as a temporary table in the catalog.
-   * Temporary tables exist only during the lifetime of this instance of [[SparkSession]].
+   * Creates a temporary view with a DataFrame. The lifetime of this temporary view is tied to
+   * this [[SparkSession]].
    */
-  protected[sql] def registerTable(df: DataFrame, tableName: String): Unit = {
-    sessionState.catalog.createTempTable(
-      sessionState.sqlParser.parseTableIdentifier(tableName).table,
-      df.logicalPlan,
-      overrideIfExists = true)
+  protected[sql] def createTempView(
+      viewName: String, df: DataFrame, replaceIfExists: Boolean) = {
+    sessionState.catalog.createTempView(
+      sessionState.sqlParser.parseTableIdentifier(viewName).table,
+      df.logicalPlan, replaceIfExists)
   }
-
 
   /* ----------------- *
    |  Everything else  |
@@ -573,7 +564,7 @@ class SparkSession private(
    * common Scala objects into [[DataFrame]]s.
    *
    * {{{
-   *   val sparkSession = new SparkSession(sc)
+   *   val sparkSession = SparkSession.builder.getOrCreate()
    *   import sparkSession.implicits._
    * }}}
    *
@@ -585,6 +576,15 @@ class SparkSession private(
     protected override def _sqlContext: SQLContext = wrapped
   }
   // scalastyle:on
+
+  /**
+   * Stop the underlying [[SparkContext]].
+   *
+   * @since 2.0.0
+   */
+  def stop(): Unit = {
+    sparkContext.stop()
+  }
 
   protected[sql] def parseSql(sql: String): LogicalPlan = {
     sessionState.sqlParser.parsePlan(sql)
@@ -756,7 +756,7 @@ object SparkSession {
    * Creates a [[SparkSession.Builder]] for constructing a [[SparkSession]].
    * @since 2.0.0
    */
-  def builder: Builder = new Builder
+  def builder(): Builder = new Builder
 
   private val HIVE_SHARED_STATE_CLASS_NAME = "org.apache.spark.sql.hive.HiveSharedState"
   private val HIVE_SESSION_STATE_CLASS_NAME = "org.apache.spark.sql.hive.HiveSessionState"
@@ -803,19 +803,6 @@ object SparkSession {
       true
     } catch {
       case _: ClassNotFoundException | _: NoClassDefFoundError => false
-    }
-  }
-
-  /**
-   * Create a new [[SparkSession]] with a catalog backed by Hive.
-   */
-  def withHiveSupport(sc: SparkContext): SparkSession = {
-    if (hiveClassesArePresent) {
-      sc.conf.set(CATALOG_IMPLEMENTATION.key, "hive")
-      new SparkSession(sc)
-    } else {
-      throw new IllegalArgumentException(
-        "Unable to instantiate SparkSession with Hive support because Hive classes are not found.")
     }
   }
 
