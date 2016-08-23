@@ -40,7 +40,7 @@ RDDs have _[actions](programming-guide.html#actions)_, which return values, and 
 
 {% highlight scala %}
 scala> textFile.count() // Number of items in this RDD
-res0: Long = 126
+res0: Long = 126 // May be different from yours as README.md will change over time, similar to other outputs
 
 scala> textFile.first() // First item in this RDD
 res1: String = # Apache Spark
@@ -184,10 +184,10 @@ scala> linesWithSpark.cache()
 res7: linesWithSpark.type = MapPartitionsRDD[2] at filter at <console>:27
 
 scala> linesWithSpark.count()
-res8: Long = 19
+res8: Long = 15
 
 scala> linesWithSpark.count()
-res9: Long = 19
+res9: Long = 15
 {% endhighlight %}
 
 It may seem silly to use Spark to explore and cache a 100-line text file. The interesting part is
@@ -202,10 +202,10 @@ a cluster, as described in the [programming guide](programming-guide.html#initia
 >>> linesWithSpark.cache()
 
 >>> linesWithSpark.count()
-19
+15
 
 >>> linesWithSpark.count()
-19
+15
 {% endhighlight %}
 
 It may seem silly to use Spark to explore and cache a 100-line text file. The interesting part is
@@ -289,13 +289,13 @@ $ find .
 # Package a jar containing your application
 $ sbt package
 ...
-[info] Packaging {..}/{..}/target/scala-2.10/simple-project_2.10-1.0.jar
+[info] Packaging {..}/{..}/target/scala-{{site.SCALA_BINARY_VERSION}}/simple-project_{{site.SCALA_BINARY_VERSION}}-1.0.jar
 
 # Use spark-submit to run your application
 $ YOUR_SPARK_HOME/bin/spark-submit \
   --class "SimpleApp" \
   --master local[4] \
-  target/scala-2.10/simple-project_2.10-1.0.jar
+  target/scala-{{site.SCALA_BINARY_VERSION}}/simple-project_{{site.SCALA_BINARY_VERSION}}-1.0.jar
 ...
 Lines with a: 46, Lines with b: 23
 {% endhighlight %}

@@ -19,8 +19,11 @@ package org.apache.spark.util
 
 import java.{lang => jl}
 import java.io.ObjectInputStream
+import java.util.ArrayList
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+
+import scala.collection.JavaConverters._
 
 import org.apache.spark.{InternalAccumulator, SparkContext, TaskContext}
 import org.apache.spark.scheduler.AccumulableInfo
@@ -54,7 +57,7 @@ abstract class AccumulatorV2[IN, OUT] extends Serializable {
 
   /**
    * Returns true if this accumulator has been registered.  Note that all accumulators must be
-   * registered before ues, or it will throw exception.
+   * registered before use, or it will throw exception.
    */
   final def isRegistered: Boolean =
     metadata != null && AccumulatorContext.get(metadata.id).isDefined
@@ -130,7 +133,7 @@ abstract class AccumulatorV2[IN, OUT] extends Serializable {
   def reset(): Unit
 
   /**
-   * Takes the inputs and accumulates. e.g. it can be a simple `+=` for counter accumulator.
+   * Takes the inputs and accumulates.
    */
   def add(v: IN): Unit
 
@@ -255,6 +258,19 @@ private[spark] object AccumulatorContext {
   def clear(): Unit = {
     originals.clear()
   }
+
+  /**
+   * Looks for a registered accumulator by accumulator name.
+   */
+  private[spark] def lookForAccumulatorByName(name: String): Option[AccumulatorV2[_, _]] = {
+    originals.values().asScala.find { ref =>
+      val acc = ref.get
+      acc != null && acc.name.isDefined && acc.name.get == name
+    }.map(_.get)
+  }
+
+  // Identifier for distinguishing SQL metrics from other accumulators
+  private[spark] val SQL_ACCUM_IDENTIFIER = "sql"
 }
 
 
@@ -411,15 +427,20 @@ class DoubleAccumulator extends AccumulatorV2[jl.Double, jl.Double] {
 }
 
 
-class ListAccumulator[T] extends AccumulatorV2[T, java.util.List[T]] {
-  private val _list: java.util.List[T] = new java.util.ArrayList[T]
+/**
+ * An [[AccumulatorV2 accumulator]] for collecting a list of elements.
+ *
+ * @since 2.0.0
+ */
+class CollectionAccumulator[T] extends AccumulatorV2[T, java.util.List[T]] {
+  private val _list: java.util.List[T] = new ArrayList[T]
 
   override def isZero: Boolean = _list.isEmpty
 
-  override def copyAndReset(): ListAccumulator[T] = new ListAccumulator
+  override def copyAndReset(): CollectionAccumulator[T] = new CollectionAccumulator
 
-  override def copy(): ListAccumulator[T] = {
-    val newAcc = new ListAccumulator[T]
+  override def copy(): CollectionAccumulator[T] = {
+    val newAcc = new CollectionAccumulator[T]
     newAcc._list.addAll(_list)
     newAcc
   }
@@ -429,12 +450,14 @@ class ListAccumulator[T] extends AccumulatorV2[T, java.util.List[T]] {
   override def add(v: T): Unit = _list.add(v)
 
   override def merge(other: AccumulatorV2[T, java.util.List[T]]): Unit = other match {
-    case o: ListAccumulator[T] => _list.addAll(o.value)
+    case o: CollectionAccumulator[T] => _list.addAll(o.value)
     case _ => throw new UnsupportedOperationException(
       s"Cannot merge ${this.getClass.getName} with ${other.getClass.getName}")
   }
 
-  override def value: java.util.List[T] = java.util.Collections.unmodifiableList(_list)
+  override def value: java.util.List[T] = _list.synchronized {
+    java.util.Collections.unmodifiableList(new ArrayList[T](_list))
+  }
 
   private[spark] def setValue(newValue: java.util.List[T]): Unit = {
     _list.clear()

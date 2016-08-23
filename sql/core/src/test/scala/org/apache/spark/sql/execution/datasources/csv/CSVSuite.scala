@@ -31,23 +31,25 @@ import org.apache.spark.sql.test.{SharedSQLContext, SQLTestUtils}
 import org.apache.spark.sql.types._
 
 class CSVSuite extends QueryTest with SharedSQLContext with SQLTestUtils {
-  private val carsFile = "cars.csv"
-  private val carsMalformedFile = "cars-malformed.csv"
-  private val carsFile8859 = "cars_iso-8859-1.csv"
-  private val carsTsvFile = "cars.tsv"
-  private val carsAltFile = "cars-alternative.csv"
-  private val carsUnbalancedQuotesFile = "cars-unbalanced-quotes.csv"
-  private val carsNullFile = "cars-null.csv"
-  private val carsBlankColName = "cars-blank-column-name.csv"
-  private val emptyFile = "empty.csv"
-  private val commentsFile = "comments.csv"
-  private val disableCommentsFile = "disable_comments.csv"
-  private val boolFile = "bool.csv"
-  private val decimalFile = "decimal.csv"
-  private val simpleSparseFile = "simple_sparse.csv"
-  private val numbersFile = "numbers.csv"
-  private val datesFile = "dates.csv"
-  private val unescapedQuotesFile = "unescaped-quotes.csv"
+  import testImplicits._
+
+  private val carsFile = "test-data/cars.csv"
+  private val carsMalformedFile = "test-data/cars-malformed.csv"
+  private val carsFile8859 = "test-data/cars_iso-8859-1.csv"
+  private val carsTsvFile = "test-data/cars.tsv"
+  private val carsAltFile = "test-data/cars-alternative.csv"
+  private val carsUnbalancedQuotesFile = "test-data/cars-unbalanced-quotes.csv"
+  private val carsNullFile = "test-data/cars-null.csv"
+  private val carsBlankColName = "test-data/cars-blank-column-name.csv"
+  private val emptyFile = "test-data/empty.csv"
+  private val commentsFile = "test-data/comments.csv"
+  private val disableCommentsFile = "test-data/disable_comments.csv"
+  private val boolFile = "test-data/bool.csv"
+  private val decimalFile = "test-data/decimal.csv"
+  private val simpleSparseFile = "test-data/simple_sparse.csv"
+  private val numbersFile = "test-data/numbers.csv"
+  private val datesFile = "test-data/dates.csv"
+  private val unescapedQuotesFile = "test-data/unescaped-quotes.csv"
 
   private def testFile(fileName: String): String = {
     Thread.currentThread().getContextClassLoader.getResource(fileName).toString
@@ -135,7 +137,7 @@ class CSVSuite extends QueryTest with SharedSQLContext with SQLTestUtils {
   }
 
   test("test inferring decimals") {
-    val result = sqlContext.read
+    val result = spark.read
       .format("csv")
       .option("comment", "~")
       .option("header", "true")
@@ -364,6 +366,83 @@ class CSVSuite extends QueryTest with SharedSQLContext with SQLTestUtils {
     }
   }
 
+  test("save csv with quoteAll enabled") {
+    withTempDir { dir =>
+      val csvDir = new File(dir, "csv").getCanonicalPath
+
+      val data = Seq(("test \"quote\"", 123, "it \"works\"!", "\"very\" well"))
+      val df = spark.createDataFrame(data)
+
+      // escapeQuotes should be true by default
+      df.coalesce(1).write
+        .format("csv")
+        .option("quote", "\"")
+        .option("escape", "\"")
+        .option("quoteAll", "true")
+        .save(csvDir)
+
+      val results = spark.read
+        .format("text")
+        .load(csvDir)
+        .collect()
+
+      val expected = "\"test \"\"quote\"\"\",\"123\",\"it \"\"works\"\"!\",\"\"\"very\"\" well\""
+
+      assert(results.toSeq.map(_.toSeq) === Seq(Seq(expected)))
+    }
+  }
+
+  test("save csv with quote escaping enabled") {
+    withTempDir { dir =>
+      val csvDir = new File(dir, "csv").getCanonicalPath
+
+      val data = Seq(("test \"quote\"", 123, "it \"works\"!", "\"very\" well"))
+      val df = spark.createDataFrame(data)
+
+      // escapeQuotes should be true by default
+      df.coalesce(1).write
+        .format("csv")
+        .option("quote", "\"")
+        .option("escape", "\"")
+        .save(csvDir)
+
+      val results = spark.read
+        .format("text")
+        .load(csvDir)
+        .collect()
+
+      val expected = "\"test \"\"quote\"\"\",123,\"it \"\"works\"\"!\",\"\"\"very\"\" well\""
+
+      assert(results.toSeq.map(_.toSeq) === Seq(Seq(expected)))
+    }
+  }
+
+  test("save csv with quote escaping disabled") {
+    withTempDir { dir =>
+      val csvDir = new File(dir, "csv").getCanonicalPath
+
+      val data = Seq(("test \"quote\"", 123, "it \"works\"!", "\"very\" well"))
+      val df = spark.createDataFrame(data)
+
+      // escapeQuotes should be true by default
+      df.coalesce(1).write
+        .format("csv")
+        .option("quote", "\"")
+        .option("escapeQuotes", "false")
+        .option("escape", "\"")
+        .save(csvDir)
+
+      val results = spark.read
+        .format("text")
+        .load(csvDir)
+        .collect()
+
+      val expected = "test \"quote\",123,it \"works\"!,\"\"\"very\"\" well\""
+
+      assert(results.toSeq.map(_.toSeq) === Seq(Seq(expected)))
+    }
+  }
+
   test("commented lines in CSV data") {
     val results = spark.read
       .format("csv")
@@ -581,5 +660,35 @@ class CSVSuite extends QueryTest with SharedSQLContext with SQLTestUtils {
       .load(testFile(numbersFile))
 
     assert(numbers.count() == 8)
+  }
+
+  test("error handling for unsupported data types.") {
+    withTempDir { dir =>
+      val csvDir = new File(dir, "csv").getCanonicalPath
+      var msg = intercept[UnsupportedOperationException] {
+        Seq((1, "Tesla")).toDF("a", "b").selectExpr("struct(a, b)").write.csv(csvDir)
+      }.getMessage
+      assert(msg.contains("CSV data source does not support struct<a:int,b:string> data type"))
+
+      msg = intercept[UnsupportedOperationException] {
+        Seq((1, Map("Tesla" -> 3))).toDF("id", "cars").write.csv(csvDir)
+      }.getMessage
+      assert(msg.contains("CSV data source does not support map<string,int> data type"))
+
+      msg = intercept[UnsupportedOperationException] {
+        Seq((1, Array("Tesla", "Chevy", "Ford"))).toDF("id", "brands").write.csv(csvDir)
+      }.getMessage
+      assert(msg.contains("CSV data source does not support array<string> data type"))
+    }
+  }
+
+  test("SPARK-15585 turn off quotations") {
+    val cars = spark.read
+      .format("csv")
+      .option("header", "true")
+      .option("quote", "")
+      .load(testFile(carsUnbalancedQuotesFile))
+
+    verifyCars(cars, withHeader = true, checkValues = false)
   }
 }
